@@ -10,7 +10,7 @@ st.set_page_config(page_title="Uber Co-Pilot Advisor", layout="wide")
 
 @st.cache_data(show_spinner=False)
 def load_all_data():
-    data = load_data_from_excel("../data/data_sets.xlsx")
+    data = load_data_from_excel("data/data_sets.xlsx")
     if data is None:
         st.error("Failed to load data. Please ensure the Excel file exists in '../data/data_sets.xlsx'.")
         st.stop()
@@ -74,8 +74,14 @@ def main():
     # Sample candidate locations
     candidate_locations = sample_candidate_locations(heatmap_df, current_hex, sample_size=5)
 
+    # Hour selection input (0-23)
+    current_hour = st.sidebar.number_input("Current Hour (0-23)", min_value=0, max_value=23, value=12, step=1)
+
     # Active quest detection (optional)
     # For simplicity, no active quest integration here.
+
+    # Pass surge_by_hour if available
+    surge_by_hour = data.get("surge_by_hour") if isinstance(data, dict) and "surge_by_hour" in data else None
 
     recommendation, details = engine.get_recommendation(
         current_location=current_hex,
@@ -85,7 +91,9 @@ def main():
         jobs_completed=jobs_completed,
         time_remaining_in_shift_mins=int(time_remaining_mins),
         candidate_locations=candidate_locations,
-        active_quest=None
+        active_quest=None,
+        current_hour=current_hour,
+        surge_by_hour=surge_by_hour
     )
 
     fatigue_level = details.get("fatigue_level", compute_fatigue(hours_online, jobs_completed))
@@ -161,3 +169,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

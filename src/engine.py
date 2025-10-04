@@ -1,304 +1,302 @@
-from typing import Dict, Tuple, List
+"""
+Uber Driver Advisor - Real Data Implementation
+Run this after loading your Excel data.
+"""
 import pandas as pd
 import numpy as np
+from typing import Dict, Tuple
+from datetime import datetime
 
 
 class UberDriverAdvisor:
-    """Advises Uber drivers on optimal actions based on earnings, fatigue, and location data."""
+    """Advises Uber drivers on optimal actions based on real-time hotspots and surge."""
     
     # Configuration constants
-    FATIGUE_CRITICAL_THRESHOLD = 0.8  # Must take break above this
-    FATIGUE_HIGH_THRESHOLD = 0.6      # Reduced incentive to move
-    MIN_MOVE_ADVANTAGE = 1.25         # 25% earning improvement to justify move
-    MAX_HOURS_BEFORE_BREAK = 10       # Maximum continuous hours
-    TRAVEL_TIME_PENALTY = 0.15        # Assume 15 min average travel time
-    MOVE_COST_PER_KM = 0.5            # Estimated fuel/time cost
+    FATIGUE_CRITICAL_THRESHOLD = 0.8
+    MAX_HOURS_BEFORE_BREAK = 10
+    MIN_MOVE_ADVANTAGE = 1.25
+    MAX_TRAVEL_DISTANCE_KM = 15  # 30 min at 30km/h
+    AVG_CITY_SPEED_KMH = 30
+    WORK_DURATION_HOURS = 1
     
-    def __init__(self, earnings_daily: pd.DataFrame, heatmap: pd.DataFrame):
-        """
-        Initialize advisor with earnings and heatmap data.
-        
-        Args:
-            earnings_daily: DataFrame with driver earnings history
-            heatmap: DataFrame with predicted earnings per location
-        """
-        self.earnings_daily = earnings_daily
+    def __init__(self, ride_trips: pd.DataFrame, eats_orders: pd.DataFrame, 
+                 heatmap: pd.DataFrame, surge_by_hour: pd.DataFrame):
+        """Initialize advisor with data."""
+        self.ride_trips = ride_trips
+        self.eats_orders = eats_orders
         self.heatmap = heatmap
+        self.surge_by_hour = surge_by_hour
+        self._prepare_hex_coordinates()
     
-    def compute_fatigue(self, total_hours_driven: float, recent_jobs: int, 
-                       hours_since_break: float = None) -> float:
-        """
-        Calculate driver fatigue level (0-1).
+    def _prepare_hex_coordinates(self):
+        """Create lookup table for hex coordinates."""
+        rides_coords = self.ride_trips[['pickup_hex_id9', 'pickup_lat', 'pickup_lon']].drop_duplicates()
+        eats_coords = self.eats_orders[['pickup_hex_id9', 'pickup_lat', 'pickup_lon']].drop_duplicates()
         
-        Args:
-            total_hours_driven: Total hours driven today
-            recent_jobs: Number of jobs completed recently
-            hours_since_break: Hours since last significant break
-            
-        Returns:
-            Fatigue level between 0 (fresh) and 1 (exhausted)
-        """
-        # Base fatigue from hours (increases exponentially after 8 hours)
+        self.hex_coords = pd.concat([rides_coords, eats_coords]).drop_duplicates('pickup_hex_id9')
+        self.hex_coords = self.hex_coords.set_index('pickup_hex_id9')
+    
+    def haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Calculate distance between two points in km."""
+        R = 6371
+        lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+        c = 2 * np.arcsin(np.sqrt(a))
+        return R * c
+    
+    def compute_fatigue(self, total_hours_driven: float, recent_jobs: int) -> float:
+        """Calculate driver fatigue level (0-1)."""
         if total_hours_driven <= 8:
             hour_fatigue = total_hours_driven / 16
         else:
             hour_fatigue = 0.5 + (total_hours_driven - 8) / 8
         
-        # Job intensity fatigue (many short jobs = more stressful)
         job_fatigue = min(0.5, recent_jobs / 30)
-        
-        # Continuous work fatigue
-        if hours_since_break is not None:
-            continuous_fatigue = min(0.4, hours_since_break / 15)
-        else:
-            continuous_fatigue = 0
-        
-        total_fatigue = min(1.0, hour_fatigue + job_fatigue + continuous_fatigue)
+        total_fatigue = min(1.0, hour_fatigue + job_fatigue)
         return round(total_fatigue, 3)
     
-    def calculate_effective_earnings(self, eph: float, fatigue: float, 
-                                     travel_time_mins: float = 0) -> float:
-        """
-        Calculate effective earnings per hour adjusted for fatigue and travel.
+    def get_driver_status(self, driver_id: str, current_time: str) -> Dict:
+        """Get current driver status based on trips up to current_time."""
+        current_dt = pd.to_datetime(current_time)
+        current_date = current_dt.date()
         
-        Args:
-            eph: Base earnings per hour at location
-            fatigue: Current fatigue level
-            travel_time_mins: Time to reach location
-            
-        Returns:
-            Adjusted effective earnings per hour
-        """
-        # Fatigue reduces both earning potential and enjoyment
-        fatigue_multiplier = 1 - (fatigue * 0.7)  # Max 70% reduction
+        # Get trips for this driver today up to current time
+        rides = self.ride_trips[
+            (self.ride_trips['driver_id'] == driver_id) &
+            (pd.to_datetime(self.ride_trips['start_time']).dt.date == current_date) &
+            (pd.to_datetime(self.ride_trips['start_time']) <= current_dt)
+        ].copy()
         
-        # Travel time reduces effective hourly rate
-        if travel_time_mins > 0:
-            # Amortize travel time over next 2 hours of work
-            effective_hours = 2 + (travel_time_mins / 60)
-            travel_multiplier = 2 / effective_hours
-        else:
-            travel_multiplier = 1.0
+        eats = self.eats_orders[
+            (self.eats_orders['courier_id'] == driver_id) &
+            (pd.to_datetime(self.eats_orders['start_time']).dt.date == current_date) &
+            (pd.to_datetime(self.eats_orders['start_time']) <= current_dt)
+        ].copy()
         
-        return eph * fatigue_multiplier * travel_multiplier
-    
-    def recommend_action(self, current_loc: str, fatigue_level: float, 
-                        earning_per_hour: Dict[str, float],
-                        total_hours_today: float,
-                        distances: Dict[str, float] = None) -> Tuple[str, Dict]:
-        """
-        Recommend optimal action for driver.
-        
-        Args:
-            current_loc: Current location hex ID
-            fatigue_level: Current fatigue level (0-1)
-            earning_per_hour: Dict of location -> predicted EPH
-            total_hours_today: Total hours worked today
-            distances: Optional dict of location -> distance in km
-            
-        Returns:
-            Tuple of (recommendation string, details dict)
-        """
-        details = {
-            "fatigue_level": fatigue_level,
-            "current_eph": earning_per_hour.get(current_loc, 0),
-            "total_hours": total_hours_today
-        }
-        
-        # Critical fatigue check
-        if fatigue_level >= self.FATIGUE_CRITICAL_THRESHOLD:
-            return ("Take a break - your fatigue level is too high for safe driving", details)
-        
-        # Maximum hours check
-        if total_hours_today >= self.MAX_HOURS_BEFORE_BREAK:
-            return (f"Take a break - you've worked {total_hours_today:.1f} hours today", details)
-        
-        # Calculate current effective earnings
-        current_eph = earning_per_hour.get(current_loc, 0)
-        current_effective = self.calculate_effective_earnings(current_eph, fatigue_level)
-        details["current_effective_eph"] = round(current_effective, 2)
-        
-        # Find best alternative location
-        best_loc = None
-        best_effective = current_effective
-        best_raw_eph = current_eph
-        
-        for loc, eph in earning_per_hour.items():
-            if loc == current_loc:
-                continue
-            
-            # Calculate travel time (use distance if available, else estimate)
-            travel_time = 0
-            if distances and loc in distances:
-                # Assume 30 km/h average speed in city
-                travel_time = (distances[loc] / 30) * 60
-            
-            effective = self.calculate_effective_earnings(eph, fatigue_level, travel_time)
-            
-            if effective > best_effective:
-                best_loc = loc
-                best_effective = effective
-                best_raw_eph = eph
-        
-        details["best_location"] = best_loc
-        details["best_eph"] = best_raw_eph
-        details["best_effective_eph"] = round(best_effective, 2)
-        
-        # Decision logic
-        if best_loc is None:
-            return ("Stay at current location - it's your best option", details)
-        
-        # High fatigue reduces willingness to move
-        if fatigue_level >= self.FATIGUE_HIGH_THRESHOLD:
-            move_threshold = self.MIN_MOVE_ADVANTAGE * 1.3  # Need 30% more incentive
-        else:
-            move_threshold = self.MIN_MOVE_ADVANTAGE
-        
-        improvement_ratio = best_effective / current_effective if current_effective > 0 else float('inf')
-        details["improvement_ratio"] = round(improvement_ratio, 2)
-        
-        if improvement_ratio >= move_threshold:
-            earning_increase = best_effective - current_effective
-            return (
-                f"Move to {best_loc} - potential ${earning_increase:.2f}/hr increase "
-                f"(${best_effective:.2f}/hr vs ${current_effective:.2f}/hr)",
-                details
-            )
-        elif fatigue_level >= self.FATIGUE_HIGH_THRESHOLD:
-            return (
-                f"Stay at current location - you're fatigued and the move advantage "
-                f"is only {(improvement_ratio - 1) * 100:.0f}%",
-                details
-            )
-        else:
-            return (
-                f"Stay at current location - not enough advantage to move "
-                f"({(improvement_ratio - 1) * 100:.0f}% improvement)",
-                details
-            )
-    
-    def rank_locations(self, fatigue_level: float, 
-                       earning_per_hour: Dict[str, float],
-                       top_n: int = 5) -> pd.DataFrame:
-        """
-        Rank all locations by effective earnings potential.
-        
-        Args:
-            fatigue_level: Current fatigue level
-            earning_per_hour: Dict of location -> predicted EPH
-            top_n: Number of top locations to return
-            
-        Returns:
-            DataFrame with ranked locations
-        """
-        rankings = []
-        for loc, eph in earning_per_hour.items():
-            effective = self.calculate_effective_earnings(eph, fatigue_level)
-            rankings.append({
-                "location": loc,
-                "raw_eph": eph,
-                "effective_eph": effective,
-                "fatigue_adjusted": effective / eph if eph > 0 else 0
-            })
-        
-        df = pd.DataFrame(rankings)
-        df = df.sort_values("effective_eph", ascending=False).head(top_n)
-        return df.reset_index(drop=True)
-    
-    def analyze_driver(self, earner_id: str, date: str, 
-                      verbose: bool = True) -> Dict:
-        """
-        Analyze specific driver and provide recommendation.
-        
-        Args:
-            earner_id: Driver ID
-            date: Date to analyze
-            verbose: Whether to print detailed output
-            
-        Returns:
-            Dictionary with analysis results
-        """
-        # Filter data
-        df_earner = self.earnings_daily[
-            (self.earnings_daily["earner_id"] == earner_id) &
-            (self.earnings_daily["date"] == date)
-        ]
-        
-        if df_earner.empty:
-            if verbose:
-                print(f"No data found for earner {earner_id} on {date}")
-            return {"error": "No data found"}
+        if rides.empty and eats.empty:
+            return {'error': f'No activity found for {driver_id} on {current_date} up to {current_time}'}
         
         # Calculate metrics
-        total_hours = (
-            df_earner["rides_duration_mins"].sum() / 60 + 
-            df_earner["eats_duration_mins"].sum() / 60
-        )
-        recent_jobs = df_earner["total_jobs"].sum()
-        fatigue = self.compute_fatigue(total_hours, recent_jobs)
+        total_hours = rides['duration_mins'].sum() / 60 + eats['duration_mins'].sum() / 60
+        total_jobs = len(rides) + len(eats)
         
         # Get current location
-        if "pickup_hex_id9" in df_earner.columns:
-            current_loc = df_earner["pickup_hex_id9"].iloc[-1]
+        if not rides.empty:
+            last = rides.sort_values('start_time').iloc[-1]
+            current_hex = last['pickup_hex_id9']
+            current_lat = last['pickup_lat']
+            current_lon = last['pickup_lon']
+            city_id = last['city_id']
         else:
-            current_loc = "unknown"
+            last = eats.sort_values('start_time').iloc[-1]
+            current_hex = last['pickup_hex_id9']
+            current_lat = last['pickup_lat']
+            current_lon = last['pickup_lon']
+            city_id = last['city_id']
         
-        # Build earnings map
-        city_id = df_earner["city_id"].iloc[0]
-        df_heatmap = self.heatmap[self.heatmap["msg.city_id"] == city_id]
-        
-        earning_per_hour = dict(zip(
-            df_heatmap["msg.predictions.hexagon_id_9"],
-            df_heatmap["msg.predictions.predicted_eph"]
-        ))
-        
-        # Get recommendation
-        action, details = self.recommend_action(
-            current_loc, fatigue, earning_per_hour, total_hours
-        )
-        
-        # Print results
-        if verbose:
-            print(f"\n{'='*60}")
-            print(f"UBER DRIVER ADVISOR - {date}")
-            print(f"{'='*60}")
-            print(f"Driver ID: {earner_id}")
-            print(f"City: {city_id}")
-            print(f"Current Location: {current_loc}")
-            print(f"\n--- Driver Status ---")
-            print(f"Hours worked today: {total_hours:.1f}")
-            print(f"Jobs completed: {recent_jobs}")
-            print(f"Fatigue level: {fatigue:.2f} ({self._fatigue_description(fatigue)})")
-            print(f"\n--- Earnings Analysis ---")
-            print(f"Current location EPH: ${details['current_eph']:.2f}")
-            print(f"Effective EPH (fatigue-adjusted): ${details['current_effective_eph']:.2f}")
-            
-            if details.get('best_location'):
-                print(f"Best alternative: {details['best_location']} (${details['best_eph']:.2f} EPH)")
-            
-            print(f"\n--- RECOMMENDATION ---")
-            print(f"► {action}")
-            print(f"{'='*60}\n")
-            
-            # Show top locations
-            print("Top 5 Locations (Fatigue-Adjusted):")
-            rankings = self.rank_locations(fatigue, earning_per_hour, top_n=5)
-            print(rankings.to_string(index=False))
-            print()
+        fatigue = self.compute_fatigue(total_hours, total_jobs)
         
         return {
-            "earner_id": earner_id,
-            "date": date,
-            "recommendation": action,
-            "details": details,
-            "total_hours": total_hours,
-            "jobs": recent_jobs,
-            "fatigue": fatigue
+            'driver_id': driver_id,
+            'current_time': current_time,
+            'current_hex': current_hex,
+            'current_lat': current_lat,
+            'current_lon': current_lon,
+            'city_id': city_id,
+            'total_hours': total_hours,
+            'total_jobs': total_jobs,
+            'fatigue': fatigue
         }
     
+    def find_hotspots(self, city_id: int, current_hour: int, current_hex: str,
+                     current_lat: float, current_lon: float) -> pd.DataFrame:
+        """Find hotspots within travel distance."""
+        city_heatmap = self.heatmap[self.heatmap['msg.city_id'] == city_id].copy()
+        
+        if city_heatmap.empty:
+            return pd.DataFrame()
+        
+        # Get surge
+        surge_data = self.surge_by_hour[
+            (self.surge_by_hour['city_id'] == city_id) &
+            (self.surge_by_hour['hour'] == current_hour)
+        ]
+        surge_multiplier = 1.0 if surge_data.empty else surge_data['surge_multiplier'].iloc[0]
+        
+        # Filter for promising areas
+        median_eph = city_heatmap['msg.predictions.predicted_eph'].median()
+        hotspots = city_heatmap[
+            city_heatmap['msg.predictions.predicted_eph'] * surge_multiplier > median_eph
+        ].copy()
+        
+        # Add coordinates
+        hotspots = hotspots.merge(self.hex_coords, left_on='msg.predictions.hexagon_id_9',
+                                 right_index=True, how='left')
+        hotspots = hotspots.dropna(subset=['pickup_lat', 'pickup_lon'])
+        
+        if hotspots.empty:
+            return pd.DataFrame()
+        
+        # Calculate distances
+        hotspots['distance_km'] = hotspots.apply(
+            lambda row: self.haversine_distance(current_lat, current_lon,
+                                               row['pickup_lat'], row['pickup_lon']), axis=1
+        )
+        
+        # Filter by distance
+        hotspots = hotspots[
+            (hotspots['distance_km'] > 0.5) &
+            (hotspots['distance_km'] <= self.MAX_TRAVEL_DISTANCE_KM)
+        ]
+        
+        if hotspots.empty:
+            return pd.DataFrame()
+        
+        # Calculate effective EPH
+        hotspots['travel_time_mins'] = (hotspots['distance_km'] / self.AVG_CITY_SPEED_KMH) * 60
+        hotspots['roundtrip_time_mins'] = hotspots['travel_time_mins'] * 2
+        
+        work_minutes = self.WORK_DURATION_HOURS * 60
+        hotspots['effective_eph'] = (
+            hotspots['msg.predictions.predicted_eph'] * work_minutes
+        ) / (work_minutes + hotspots['roundtrip_time_mins'])
+        
+        hotspots['effective_eph'] = hotspots['effective_eph'] * surge_multiplier
+        hotspots['surge_multiplier'] = surge_multiplier
+        
+        return hotspots.sort_values('effective_eph', ascending=False)
+    
+    def recommend_action(self, driver_id: str, current_time: str, verbose: bool = True) -> Dict:
+        """Main recommendation function."""
+        status = self.get_driver_status(driver_id, current_time)
+        
+        if 'error' in status:
+            if verbose:
+                print(f"\n❌ {status['error']}\n")
+            return status
+        
+        # Check mandatory breaks
+        if status['fatigue'] >= self.FATIGUE_CRITICAL_THRESHOLD:
+            status['recommendation'] = "Take a break - your fatigue level is critically high"
+            status['action'] = 'break'
+            if verbose:
+                self._print_output(status, None, None)
+            return status
+        
+        if status['total_hours'] >= self.MAX_HOURS_BEFORE_BREAK:
+            status['recommendation'] = f"Take a break - you've worked {status['total_hours']:.1f} hours today"
+            status['action'] = 'break'
+            if verbose:
+                self._print_output(status, None, None)
+            return status
+        
+        # Get current EPH
+        current_dt = pd.to_datetime(current_time)
+        current_hour = current_dt.hour
+        
+        current_eph_data = self.heatmap[
+            (self.heatmap['msg.city_id'] == status['city_id']) &
+            (self.heatmap['msg.predictions.hexagon_id_9'] == status['current_hex'])
+        ]
+        current_eph = 20.0 if current_eph_data.empty else current_eph_data['msg.predictions.predicted_eph'].iloc[0]
+        
+        fatigue_multiplier = 1 - (status['fatigue'] * 0.7)
+        current_effective_eph = current_eph * fatigue_multiplier
+        
+        status['current_eph'] = round(current_eph, 2)
+        status['current_effective_eph'] = round(current_effective_eph, 2)
+        
+        # Find hotspots
+        hotspots = self.find_hotspots(status['city_id'], current_hour, status['current_hex'],
+                                      status['current_lat'], status['current_lon'])
+        
+        if hotspots.empty:
+            status['recommendation'] = "Stay at current location - no better hotspots within 30min"
+            status['action'] = 'stay'
+            status['reason'] = 'no_hotspots'
+            if verbose:
+                self._print_output(status, None, hotspots)
+            return status
+        
+        # Get best hotspot
+        best = hotspots.iloc[0]
+        best_effective_eph = best['effective_eph'] * fatigue_multiplier
+        
+        status['best_hex'] = best['msg.predictions.hexagon_id_9']
+        status['best_eph'] = round(best['msg.predictions.predicted_eph'], 2)
+        status['best_effective_eph'] = round(best_effective_eph, 2)
+        status['best_distance_km'] = round(best['distance_km'], 2)
+        status['best_travel_time_mins'] = round(best['travel_time_mins'], 1)
+        
+        # Make decision
+        improvement_ratio = best_effective_eph / current_effective_eph if current_effective_eph > 0 else float('inf')
+        status['improvement_ratio'] = round(improvement_ratio, 2)
+        
+        if improvement_ratio >= self.MIN_MOVE_ADVANTAGE:
+            earning_increase = best_effective_eph - current_effective_eph
+            status['recommendation'] = (
+                f"Move to {status['best_hex']} - €{earning_increase:.2f}/hr increase "
+                f"({status['best_distance_km']}km, ~{status['best_travel_time_mins']:.0f} min drive)"
+            )
+            status['action'] = 'move'
+        else:
+            status['recommendation'] = (
+                f"Stay at current location - improvement only {(improvement_ratio - 1) * 100:.0f}% "
+                f"(need {(self.MIN_MOVE_ADVANTAGE - 1) * 100:.0f}%)"
+            )
+            status['action'] = 'stay'
+            status['reason'] = 'insufficient_improvement'
+        
+        if verbose:
+            self._print_output(status, best, hotspots)
+        
+        return status
+    
+    def _print_output(self, status: Dict, best_hotspot, all_hotspots):
+        """Print formatted output."""
+        print(f"\n{'='*70}")
+        print(f"UBER DRIVER ADVISOR - {status['current_time']}")
+        print(f"{'='*70}")
+        print(f"Driver ID: {status['driver_id']}")
+        print(f"Current Location: {status['current_hex']} (City {status['city_id']})")
+        print(f"\n--- Driver Status ---")
+        print(f"Hours worked today: {status['total_hours']:.1f}")
+        print(f"Jobs completed: {status['total_jobs']}")
+        print(f"Fatigue level: {status['fatigue']:.2f} ({self._fatigue_desc(status['fatigue'])})")
+        
+        if 'current_eph' in status:
+            print(f"\n--- Current Location ---")
+            print(f"Base EPH: €{status['current_eph']:.2f}/hr")
+            print(f"Effective EPH (fatigue-adjusted): €{status['current_effective_eph']:.2f}/hr")
+        
+        if best_hotspot is not None:
+            print(f"\n--- Best Hotspot ---")
+            print(f"Location: {status['best_hex']}")
+            print(f"Distance: {status['best_distance_km']}km (~{status['best_travel_time_mins']:.0f} min)")
+            print(f"Base EPH: €{status['best_eph']:.2f}/hr")
+            print(f"Effective EPH: €{status['best_effective_eph']:.2f}/hr")
+            print(f"Improvement: {(status['improvement_ratio'] - 1) * 100:.0f}%")
+        
+        print(f"\n--- RECOMMENDATION ---")
+        print(f"► {status['recommendation']}")
+        
+        if all_hotspots is not None and not all_hotspots.empty:
+            print(f"\n--- Top 5 Hotspots ---")
+            top5 = all_hotspots.head(5)[['msg.predictions.hexagon_id_9', 'distance_km', 
+                                         'travel_time_mins', 'msg.predictions.predicted_eph', 
+                                         'effective_eph']].copy()
+            top5.columns = ['Hex', 'Dist(km)', 'Travel(min)', 'Base EPH', 'Eff EPH']
+            for col in ['Dist(km)', 'Travel(min)', 'Base EPH', 'Eff EPH']:
+                top5[col] = top5[col].round(2)
+            print(top5.to_string(index=False))
+        
+        print(f"{'='*70}\n")
+    
     @staticmethod
-    def _fatigue_description(fatigue: float) -> str:
-        """Convert fatigue level to human description."""
+    def _fatigue_desc(fatigue: float) -> str:
+        """Convert fatigue to description."""
         if fatigue < 0.3:
             return "Fresh"
         elif fatigue < 0.5:
@@ -311,34 +309,77 @@ class UberDriverAdvisor:
             return "Exhausted"
 
 
-def main():
-    """Example usage with sample data."""
+def run_interactive(ride_trips: pd.DataFrame, eats_orders: pd.DataFrame, 
+                   heatmap: pd.DataFrame, surge_by_hour: pd.DataFrame):
+    """Interactive mode - prompts for driver ID and time."""
+    print("Initializing advisor...")
+    advisor = UberDriverAdvisor(ride_trips, eats_orders, heatmap, surge_by_hour)
     
-    # Sample earnings data
-    earnings_daily = pd.DataFrame({
-        "earner_id": ["E10000", "E10000", "E10001"],
-        "date": ["2023-01-12", "2023-01-12", "2023-01-12"],
-        "rides_duration_mins": [180, 120, 60],
-        "eats_duration_mins": [60, 90, 30],
-        "total_jobs": [8, 6, 3],
-        "pickup_hex_id9": ["hex1", "hex1", "hex2"],
-        "city_id": [1, 1, 1]
-    })
+    # Get available drivers
+    all_drivers = sorted(set(ride_trips['driver_id'].unique()) | set(eats_orders['courier_id'].unique()))
     
-    # Sample heatmap data
-    heatmap = pd.DataFrame({
-        "msg.city_id": [1, 1, 1, 1, 1],
-        "msg.predictions.hexagon_id_9": ["hex1", "hex2", "hex3", "hex4", "hex5"],
-        "msg.predictions.predicted_eph": [22, 28, 18, 25, 30]
-    })
+    # Get date range
+    ride_dates = pd.to_datetime(ride_trips['start_time'])
+    eats_dates = pd.to_datetime(eats_orders['start_time'])
+    min_date = min(ride_dates.min(), eats_dates.min())
+    max_date = max(ride_dates.max(), eats_dates.max())
     
-    # Initialize advisor
-    advisor = UberDriverAdvisor(earnings_daily, heatmap)
+    print(f"\n{'='*70}")
+    print("UBER DRIVER ADVISOR - INTERACTIVE MODE")
+    print(f"{'='*70}")
+    print(f"Total drivers: {len(all_drivers)}")
+    print(f"Date range: {min_date.date()} to {max_date.date()}")
+    print(f"{'='*70}\n")
     
-    # Analyze drivers
-    advisor.analyze_driver(earner_id="E10000", date="2023-01-12")
-    advisor.analyze_driver(earner_id="E10001", date="2023-01-12")
+    while True:
+        # Get driver ID
+        driver_id = input("Enter driver ID (or 'list' to see options, 'q' to quit): ").strip()
+        
+        if driver_id.lower() == 'q':
+            print("Goodbye!")
+            break
+        
+        if driver_id.lower() == 'list':
+            print(f"\nShowing first 30 drivers:")
+            for i, eid in enumerate(all_drivers[:30], 1):
+                print(f"  {i}. {eid}")
+            if len(all_drivers) > 30:
+                print(f"  ... and {len(all_drivers) - 30} more")
+            print()
+            continue
+        
+        if driver_id not in all_drivers:
+            print(f"❌ Driver '{driver_id}' not found. Try 'list' to see options.\n")
+            continue
+        
+        # Get time
+        time_input = input("Enter time (YYYY-MM-DD HH:MM:SS) or press Enter for latest: ").strip()
+        
+        if time_input == "":
+            # Find latest time for this driver
+            driver_rides = ride_trips[ride_trips['driver_id'] == driver_id]
+            driver_eats = eats_orders[eats_orders['courier_id'] == driver_id]
+            
+            if not driver_rides.empty:
+                latest = pd.to_datetime(driver_rides['start_time']).max()
+            elif not driver_eats.empty:
+                latest = pd.to_datetime(driver_eats['start_time']).max()
+            else:
+                print(f"❌ No data for {driver_id}\n")
+                continue
+            
+            current_time = latest.strftime('%Y-%m-%d %H:%M:%S')
+            print(f"Using latest time: {current_time}")
+        else:
+            current_time = time_input
+        
+        # Get recommendation
+        advisor.recommend_action(driver_id, current_time, verbose=True)
+        
+        # Continue?
+        another = input("Analyze another driver? (y/n): ").strip().lower()
+        if another != 'y':
+            print("Goodbye!")
+            break
+        print()
 
-
-if __name__ == "__main__":
-    main()

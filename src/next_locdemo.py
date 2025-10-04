@@ -2,16 +2,41 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Tuple, List, Optional
 import random
+# NEW DEPENDENCY: geopy is used for converting coordinates to addresses.
+# Install it by running: pip install geopy
+from geopy.geocoders import Nominatim
 
 # --- Configuration Constants ---
 # Profitability Analysis
-MOVE_ADVANTAGE_THRESHOLD = 1.25
+MOVE_ADVANTANTAGE_THRESHOLD = 1.25
 # Fuel Costs
 FUEL_TYPE_COSTS_PER_KM = { "gas": 0.35, "hybrid": 0.25, "EV": 0.15, "unknown": 0.30 }
 # Personalization Filters
 FATIGUE_HIGH_THRESHOLD = 0.6
 FATIGUE_CRITICAL_THRESHOLD = 0.8
 MAX_HOURS_CONTINUOUS = 5
+
+# --- Helper Functions for Location Conversion ---
+
+def latlon_to_location(lat: float, lon: float) -> str:
+    """Converts latitude and longitude to a readable address string."""
+    try:
+        geolocator = Nominatim(user_agent="uber_copilot_advisor")
+        # zoom=15 gives a street-level address, zoom=14 is more like a neighborhood.
+        location = geolocator.reverse((lat, lon), language="en", zoom=15)
+        return location.address if location else "Unknown location"
+    except Exception:
+        # Handle potential network errors or timeouts from the geocoding service.
+        return "Geocoding service unavailable"
+
+def get_location_from_hex(hex_id: str, mapping: pd.DataFrame) -> str:
+    """Looks up a hex_id in the mapping and returns a readable location name."""
+    if hex_id not in mapping.index:
+        return hex_id # Return the ID itself if not found
+    
+    lat, lon = mapping.loc[hex_id, ["lat", "lon"]]
+    return latlon_to_location(lat, lon)
+
 
 class DemandPredictor:
     """
@@ -133,7 +158,7 @@ class DecisionEngine:
         improvement_ratio = best_option["final_score"] / current_option["final_score"] if current_option["final_score"] > 0 else float('inf')
         details["improvement_ratio"] = round(improvement_ratio, 2)
 
-        if improvement_ratio >= MOVE_ADVANTAGE_THRESHOLD:
+        if improvement_ratio >= MOVE_ADVANTANTAGE_THRESHOLD:
             increase = best_option['final_score'] - current_option['final_score']
             return (f"Move to {best_option['location']} (~{best_option['travel_time_mins']:.0f} min drive). Potential for ${increase:.2f}/hr more.", details)
         else:
@@ -149,11 +174,13 @@ def load_data_from_excel(file_path: str) -> Dict[str, pd.DataFrame]:
         rides_trips_df = pd.read_excel(file_path, sheet_name="rides_trips")
         heatmap_df = pd.read_excel(file_path, sheet_name="heatmap")
         incentives_df = pd.read_excel(file_path, sheet_name="incentives_weekly")
+        merchants_df = pd.read_excel(file_path, sheet_name="merchants")
         return {
             "earners": earners_df,
             "rides_trips": rides_trips_df,
             "heatmap": heatmap_df,
-            "incentives_weekly": incentives_df
+            "incentives_weekly": incentives_df,
+            "merchants": merchants_df
         }
     except FileNotFoundError:
         print(f"Error: The file was not found at '{file_path}'")
@@ -178,15 +205,27 @@ def main():
     rides_trips_df = all_data["rides_trips"]
     heatmap_df = all_data["heatmap"]
     incentives_df = all_data["incentives_weekly"]
+    merchants_df = all_data["merchants"]
+    
+    # Build a comprehensive hex_id to lat/lon mapping from multiple sources.
+    print("Building location mapping...")
+    merchant_locs = merchants_df[["hex_id9", "lat", "lon"]].copy()
+    ride_pickup_locs = rides_trips_df[["pickup_hex_id9", "pickup_lat", "pickup_lon"]].copy()
+    ride_pickup_locs.columns = ["hex_id9", "lat", "lon"]
+    ride_dropoff_locs = rides_trips_df[["drop_hex_id9", "drop_lat", "drop_lon"]].copy()
+    ride_dropoff_locs.columns = ["hex_id9", "lat", "lon"]
+    
+    hex_mapping = pd.concat([merchant_locs, ride_pickup_locs, ride_dropoff_locs]).drop_duplicates(subset=["hex_id9"]).set_index("hex_id9")
+    print("Location mapping complete.")
+
 
     # --- 2. Initialize AI and Engine ---
     predictor = DemandPredictor(heatmap_data=heatmap_df)
     engine = DecisionEngine(predictor=predictor, rides_trips_data=rides_trips_df)
     
     # --- 3. Get Real-Time Inputs from the User ---
-    print("--- Uber Co-Pilot: Real-Time Recommendation ---")
+    print("\n--- Uber Co-Pilot: Real-Time Recommendation ---")
     
-    # Get and validate Driver ID
     while True:
         driver_id = input("Enter your Driver ID (e.g., E10000): ").strip()
         if driver_id in earners_df['earner_id'].values:
@@ -195,34 +234,21 @@ def main():
         else:
             print("Driver ID not found. Please try again.")
     
-    # --- 4. AUTOMATICALLY Find Active Quest ---
-    # We simulate the "current week" to look up the relevant quest.
     current_week = '2023-W14'
     print(f"\nChecking for active quests for week {current_week}...")
     active_quest = None
 
     quest_info = incentives_df[
-        (incentives_df['earner_id'] == driver_id) &
-        (incentives_df['week'] == current_week) &
-        (incentives_df['achieved'] == False)
+        (incentives_df['earner_id'] == driver_id) & (incentives_df['week'] == current_week) & (incentives_df['achieved'] == False)
     ]
 
     if not quest_info.empty:
         quest_row = quest_info.iloc[0]
-        active_quest = {
-            "type": "trip_count",
-            "target": quest_row['target_jobs'],
-            "progress": quest_row['completed_jobs'],
-            "deadline_hours": 48, # Assume 48 hours left in the week for simplicity
-            "reward": quest_row['bonus_eur']
-        }
-        print(f"Active Quest Found: Complete {quest_row['target_jobs']} trips for a €{quest_row['bonus_eur']} bonus.")
-        print(f"Progress: {quest_row['completed_jobs']}/{quest_row['target_jobs']}")
+        active_quest = { "type": "trip_count", "target": quest_row['target_jobs'], "progress": quest_row['completed_jobs'], "deadline_hours": 48, "reward": quest_row['bonus_eur'] }
+        print(f"Active Quest Found: Complete {quest_row['target_jobs']} trips for a €{quest_row['bonus_eur']} bonus. (Progress: {quest_row['completed_jobs']}/{quest_row['target_jobs']})")
     else:
         print("No active quest found for this week.")
 
-    # --- 5. Get Remaining User Inputs ---
-    # Get shift duration
     while True:
         try:
             hours_to_drive = float(input("\nHow many more hours do you want to drive? "))
@@ -234,21 +260,24 @@ def main():
         except ValueError:
             print("Invalid input. Please enter a number.")
 
-    # Get current location
-    sample_locations = list(heatmap_df["msg.predictions.hexagon_id_9"].head(5))
-    print("\nSelect your approximate current location:")
-    for i, loc in enumerate(sample_locations, 1):
-        print(f"  {i}. {loc}")
+    # MODIFIED: Get current location via free-text input and on-demand conversion.
+    print("\nSome available locations include 'Amsterdam Centraal', 'TU Delft', 'Utrecht Centraal'")
     while True:
-        try:
-            choice = int(input(f"Enter choice (1-{len(sample_locations)}): "))
-            if 1 <= choice <= len(sample_locations):
-                current_loc = sample_locations[choice - 1]
+        user_input_location = input("Enter your approximate current location: ").strip().lower()
+        found_location = False
+        # Search through all known hexes for a match.
+        for hex_id in hex_mapping.index:
+            # Convert hex to readable name on the fly.
+            readable_name = get_location_from_hex(hex_id, hex_mapping)
+            if user_input_location in readable_name.lower():
+                current_loc_hex = hex_id
+                print(f"--> Location matched: {readable_name}")
+                found_location = True
                 break
-            else:
-                print("Invalid choice.")
-        except ValueError:
-            print("Invalid input. Please enter a number.")
+        if found_location:
+            break
+        else:
+            print("Location not found in our data. Please try a more general name (e.g., a street or neighborhood).")
     
     # --- 6. Simulate Driver State & Run Engine ---
     hours_online_sim = random.uniform(1, 4)
@@ -257,17 +286,15 @@ def main():
     print("\n--- Generating Recommendation ---")
     print(f"Simulating driver state: {hours_online_sim:.1f} hours online, {jobs_completed_sim} jobs completed.")
     
-    candidate_locations = {
-        current_loc: {"distance_km": 0, "travel_time_mins": 0}
-    }
+    candidate_locations = { current_loc_hex: {"distance_km": 0, "travel_time_mins": 0} }
     for loc in heatmap_df.sample(3)["msg.predictions.hexagon_id_9"]:
-         if loc != current_loc:
+         if loc != current_loc_hex:
             dist = random.uniform(1.0, 5.0)
-            time = dist * 2.5 # Approximate time from distance
+            time = dist * 2.5
             candidate_locations[loc] = {"distance_km": dist, "travel_time_mins": time}
 
     recommendation, details = engine.get_recommendation(
-        current_location=current_loc,
+        current_location=current_loc_hex,
         city_id=driver_info['home_city_id'],
         fuel_type=driver_info['fuel_type'],
         hours_online=hours_online_sim,
@@ -277,17 +304,24 @@ def main():
         active_quest=active_quest
     )
 
-    # --- 7. Display Result ---
+    # --- 7. Display Result with Readable Names ---
+    readable_recommendation = recommendation
+    all_hex_ids = list(candidate_locations.keys())
+    for hex_id in all_hex_ids:
+        if hex_id in readable_recommendation:
+            readable_loc = get_location_from_hex(hex_id, hex_mapping)
+            readable_recommendation = readable_recommendation.replace(hex_id, f"'{readable_loc}'")
+            
     print("\n=====================================")
     print(f"Recommendation for {driver_id}:")
-    print(f"► {recommendation}")
+    print(f"► {readable_recommendation}")
     print("=====================================")
     print(f"Fatigue Level: {details.get('fatigue_level', 'N/A')}")
     if details.get('ranked_options'):
         print("\nTop Options Analyzed:")
         for opt in details['ranked_options']:
-            print(f"  - {opt['location']}: Score={opt['final_score']:.2f} (Effective EPH: ${opt['effective_eph']:.2f})")
-
+            loc_name = get_location_from_hex(opt['location'], hex_mapping)
+            print(f"  - {loc_name}: Score={opt['final_score']:.2f} (Effective EPH: ${opt['effective_eph']:.2f})")
 
 if __name__ == "__main__":
     main()

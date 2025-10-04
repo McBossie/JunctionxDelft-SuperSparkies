@@ -6,6 +6,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from engine import UberDriverAdvisor
+from hex_readable import get_location_from_hex
 
 # Page config
 st.set_page_config(
@@ -62,8 +63,9 @@ def load_data():
         eats_orders = pd.read_excel(path, sheet_name='eats_orders')
         heatmap = pd.read_excel(path, sheet_name='heatmap')
         surge_by_hour = pd.read_excel(path, sheet_name='surge_by_hour')
+        merchants = pd.read_excel(path, sheet_name='merchants')
     
-    return ride_trips, eats_orders, heatmap, surge_by_hour
+    return ride_trips, eats_orders, heatmap, surge_by_hour, merchants
 
 @st.cache_resource
 def get_advisor(_ride_trips, _eats_orders, _heatmap, _surge_by_hour):
@@ -111,6 +113,7 @@ def format_fatigue_badge(fatigue):
         return "Exhausted"
 
 # Main app
+
 def main():
     # Header
     st.markdown('<h1 class="main-header">🚗 Uber Driver Advisor</h1>', unsafe_allow_html=True)
@@ -118,7 +121,7 @@ def main():
     
     # Load data
     try:
-        ride_trips, eats_orders, heatmap, surge_by_hour = load_data()
+        ride_trips, eats_orders, heatmap, surge_by_hour, hex_mapping = load_data()
         advisor = get_advisor(ride_trips, eats_orders, heatmap, surge_by_hour)
         st.success(f"Data loaded: {len(ride_trips)} rides, {len(eats_orders)} deliveries")
     except Exception as e:
@@ -153,8 +156,14 @@ def main():
     # Time selection
     st.sidebar.header("Select Time")
     
-    use_latest = st.sidebar.checkbox("Use latest available time", value=True)
-    
+    if "use_latest" not in st.session_state:
+        st.session_state.use_latest = True
+
+    use_latest = st.sidebar.checkbox(
+        "Use latest available time",
+        value=st.session_state.use_latest,
+        key="use_latest"
+    )    
     if use_latest:
         selected_datetime = driver_times.max()
         st.sidebar.info(f"Using: {selected_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -166,9 +175,13 @@ def main():
             max_value=max_date
         )
         
+        if "selected_time" not in st.session_state:
+            st.session_state.selected_time = datetime.now().time()
+
         selected_time = st.sidebar.time_input(
             "Time:",
-            value=datetime.now().time()
+            value=st.session_state.selected_time,
+            key="selected_time"
         )
         
         selected_datetime = datetime.combine(selected_date, selected_time)
@@ -208,7 +221,9 @@ def main():
             st.markdown(format_fatigue_badge(result['fatigue']))
         
         with col4:
-            st.metric("Current Location", result['current_hex'])
+            # Display current hex code converted to location using mapping
+            _, _, current_location_str = get_location_from_hex(result['current_hex'], hex_mapping)
+            st.metric("Current Location", current_location_str)
         
         # Current location info
         st.markdown("---")
@@ -226,6 +241,12 @@ def main():
         st.markdown("---")
         st.header("💡 Recommendation")
         
+        # transform result into google maps link
+        hex_lat = result['current_lat']   # latitude of the hex center
+        hex_lon = result['current_lon']   # longitude of the hex center
+        maps_url = f"https://www.google.com/maps/search/?api=1&query={hex_lat},{hex_lon}"
+        
+        
         # Color based on action
         if result['action'] == 'break':
             rec_class = "rec-break"
@@ -237,10 +258,11 @@ def main():
             rec_class = "rec-stay"
             icon = "⏸️"
         
-        st.markdown(
-            f'<div class="recommendation-box {rec_class}">{icon} {result["recommendation"]}</div>',
-            unsafe_allow_html=True
-        )
+        if result['action'] == 'move':
+            st.markdown(
+                f"Go to [this area]({maps_url}) and wait there to pick up rides for more effective earnings!", 
+                unsafe_allow_html=True
+            )
         
         # Best hotspot details (if moving)
         if result['action'] == 'move':
@@ -250,7 +272,9 @@ def main():
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                st.metric("Location", result['best_hex'])
+                # Display best hex code converted to location using mapping
+                _, _, best_location_str = get_location_from_hex(result['best_hex'], hex_mapping)
+                st.metric("Location", best_location_str)
             
             with col2:
                 st.metric("Distance", f"{result['best_distance_km']} km")
@@ -264,11 +288,11 @@ def main():
         
         # Additional insights
         if result['action'] == 'stay' and result.get('reason') == 'no_hotspots':
-            st.info("ℹ️ No better locations found within 30 minutes drive. Current location is optimal.")
+            st.info("Info: No better locations found within 30 minutes drive. Current location is optimal.")
         
         elif result['action'] == 'stay' and result.get('reason') == 'insufficient_improvement':
-            st.info(f"ℹ️ Best alternative only improves earnings by {(result['improvement_ratio'] - 1) * 100:.0f}%. "
-                   f"Travel time not worth it (need ≥25% improvement).")
+            st.info(f"Info: Best alternative only improves earnings by {(result['improvement_ratio'] - 1) * 100:.0f}%. "
+                   f"Travel time probably not worth it (need ≥25% improvement).")
 
 if __name__ == "__main__":
     main()

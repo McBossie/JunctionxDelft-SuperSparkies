@@ -53,16 +53,8 @@ class UberDriverAdvisor:
         else:
             hour_fatigue = 0.5 + (total_hours_driven - 8) / 8
         
-        # Job intensity fatigue (many short jobs = more stressful)
         job_fatigue = min(0.5, recent_jobs / 30)
-        
-        # Continuous work fatigue
-        if hours_since_break is not None:
-            continuous_fatigue = min(0.4, hours_since_break / 15)
-        else:
-            continuous_fatigue = 0
-        
-        total_fatigue = min(1.0, hour_fatigue + job_fatigue + continuous_fatigue)
+        total_fatigue = min(1.0, hour_fatigue + job_fatigue)
         return round(total_fatigue, 3)
     
     def get_driver_status(self, driver_id: str, current_time: str) -> Dict:

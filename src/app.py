@@ -1,284 +1,166 @@
-"""
-Streamlit Web App for Uber Driver Advisor
-Run with: streamlit run app.py
-"""
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
-from engine import UberDriverAdvisor
+import random
+from typing import Optional, Dict
+from next_locdemo import load_data_from_excel, DemandPredictor, DecisionEngine, FATIGUE_HIGH_THRESHOLD, FATIGUE_CRITICAL_THRESHOLD, MOVE_ADVANTANTAGE_THRESHOLD
 
-# Page config
-st.set_page_config(
-    page_title="Uber Driver Advisor",
-    page_icon="🚗",
-    layout="wide"
-)
+st.set_page_config(page_title="Uber Co-Pilot Advisor", layout="wide")
 
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {s
-        font-size: 3rem;
-        color: #000000;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 1.5rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-    }
-    .recommendation-box {
-        padding: 2rem;
-        border-radius: 10px;
-        margin: 2rem 0;
-        font-size: 1.2rem;
-        font-weight: bold;
-    }
-    .rec-break {
-        background-color: #ff4b4b;
-        color: white;
-    }
-    .rec-move {
-        background-color: #00cc00;
-        color: white;
-    }
-    .rec-stay {
-        background-color: #ffa500;
-        color: white;
-    }
-</style>
-""", unsafe_allow_html=True)
+@st.cache_data(show_spinner=False)
+def load_all_data():
+    data = load_data_from_excel("../data/data_sets.xlsx")
+    if data is None:
+        st.error("Failed to load data. Please ensure the Excel file exists in '../data/data_sets.xlsx'.")
+        st.stop()
+    return data
 
-# Load data (cache for performance)
-@st.cache_data
-def load_data():
-    """Load all data once and cache it."""
-    path = "/Users/chahid/projects/uber-copilot/data/data_sets.xlsx"
-    
-    with st.spinner("Loading data..."):
-        ride_trips = pd.read_excel(path, sheet_name='rides_trips')
-        eats_orders = pd.read_excel(path, sheet_name='eats_orders')
-        heatmap = pd.read_excel(path, sheet_name='heatmap')
-        surge_by_hour = pd.read_excel(path, sheet_name='surge_by_hour')
-        merchants = pd.read_excel(path, sheet_name='merchants')
-    
-    return ride_trips, eats_orders, heatmap, surge_by_hour, merchants
+def sample_candidate_locations(heatmap_df: pd.DataFrame, current_hex: str, sample_size: int = 5) -> Dict[str, Dict[str, float]]:
+    candidate_locations = {current_hex: {"distance_km": 0, "travel_time_mins": 0}}
+    sampled = heatmap_df["msg.predictions.hexagon_id_9"].drop_duplicates().sample(sample_size + 3, random_state=42).tolist()
+    count = 0
+    for loc in sampled:
+        if loc != current_hex and count < sample_size:
+            dist = random.uniform(1.0, 5.0)
+            time = dist * 2.5
+            candidate_locations[loc] = {"distance_km": dist, "travel_time_mins": time}
+            count += 1
+    return candidate_locations
 
-@st.cache_resource
-def get_advisor(_ride_trips, _eats_orders, _heatmap, _surge_by_hour):
-    """Initialize advisor once and cache it."""
-    return UberDriverAdvisor(_ride_trips, _eats_orders, _heatmap, _surge_by_hour)
-
-def get_driver_list(ride_trips, eats_orders):
-    """Get list of all drivers with stats."""
-    all_drivers = list(set(ride_trips['driver_id'].unique()) | 
-                      set(eats_orders['courier_id'].unique()))
-    
-    driver_stats = []
-    for driver_id in all_drivers:
-        driver_rides = ride_trips[ride_trips['driver_id'] == driver_id]
-        driver_eats = eats_orders[eats_orders['courier_id'] == driver_id]
-        
-        if not driver_rides.empty:
-            total_trips = len(driver_rides)
-            last_active = pd.to_datetime(driver_rides['start_time']).max()
-        elif not driver_eats.empty:
-            total_trips = len(driver_eats)
-            last_active = pd.to_datetime(driver_eats['start_time']).max()
-        else:
-            continue
-        
-        driver_stats.append({
-            'driver_id': driver_id,
-            'total_trips': total_trips,
-            'last_active': last_active
-        })
-    
-    return sorted(driver_stats, key=lambda x: x['last_active'], reverse=True)
-
-def format_fatigue_badge(fatigue):
-    """Return colored badge for fatigue level."""
-    if fatigue < 0.3:
-        return "Fresh"
-    elif fatigue < 0.5:
-        return "Moderate"
-    elif fatigue < 0.7:
-        return "Tired"
-    elif fatigue < 0.85:
-        return "Very Tired"
-    else:
-        return "Exhausted"
-
-# Main app
+def compute_fatigue(hours_online: float, jobs_completed: int) -> float:
+    # replicate the fatigue calculation logic from DecisionEngine
+    MAX_HOURS_CONTINUOUS = 5
+    hour_fatigue = min(1.0, (hours_online / MAX_HOURS_CONTINUOUS))
+    job_fatigue = min(1.0, (jobs_completed / 50))
+    return min(1.0, (hour_fatigue * 0.7) + (job_fatigue * 0.3))
 
 def main():
-    # Header
-    st.markdown('<h1 class="main-header">🚗 Uber Driver Advisor</h1>', unsafe_allow_html=True)
-    st.markdown("### Get intelligent recommendations on where to drive next")
-    
-    # Load data
-    try:
-        ride_trips, eats_orders, heatmap, surge_by_hour, merchants = load_data()
-        advisor = get_advisor(ride_trips, eats_orders, heatmap, surge_by_hour)
-        st.success(f"Data loaded: {len(ride_trips)} rides, {len(eats_orders)} deliveries")
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        st.stop()
-    
-    # Sidebar - Driver Selection
-    st.sidebar.header("🔍 Select Driver")
-    
-    driver_list = get_driver_list(ride_trips, eats_orders)
-    
-    # Driver selection dropdown
-    driver_options = [f"{d['driver_id']} ({d['total_trips']} trips)" for d in driver_list[:50]]
-    selected_driver_str = st.sidebar.selectbox("Choose a driver:", driver_options, index=0)
-    selected_driver_id = selected_driver_str.split(' ')[0]
-    
-    # Get driver's available dates
-    driver_rides = ride_trips[ride_trips['driver_id'] == selected_driver_id]
-    driver_eats = eats_orders[eats_orders['courier_id'] == selected_driver_id]
-    
-    if not driver_rides.empty:
-        driver_times = pd.to_datetime(driver_rides['start_time'])
-    elif not driver_eats.empty:
-        driver_times = pd.to_datetime(driver_eats['start_time'])
-    else:
-        st.error("No data for selected driver")
-        st.stop()
-    
-    min_date = driver_times.min().date()
-    max_date = driver_times.max().date()
-    
-    # Time selection
-    st.sidebar.header("Select Time")
-    
-    if "use_latest" not in st.session_state:
-        st.session_state.use_latest = True
+    st.title("Uber Co-Pilot Advisor")
+    data = load_all_data()
 
-    use_latest = st.sidebar.checkbox(
-        "Use latest available time",
-        value=st.session_state.use_latest,
-        key="use_latest"
-    )    
-    if use_latest:
-        selected_datetime = driver_times.max()
-        st.sidebar.info(f"Using: {selected_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
-    else:
-        selected_date = st.sidebar.date_input(
-            "Date:",
-            value=max_date,
-            min_value=min_date,
-            max_value=max_date
-        )
-        
-        if "selected_time" not in st.session_state:
-            st.session_state.selected_time = datetime.now().time()
+    earners_df = data["earners"]
+    rides_trips_df = data["rides_trips"]
+    heatmap_df = data["heatmap"]
 
-        selected_time = st.sidebar.time_input(
-            "Time:",
-            value=st.session_state.selected_time,
-            key="selected_time"
-        )
-        
-        selected_datetime = datetime.combine(selected_date, selected_time)
-    
-    # Get Recommendation Button
-    if st.sidebar.button("Get Recommendation", type="primary", use_container_width=True):
-        st.session_state['show_recommendation'] = True
-    
-    # Show recommendation if button clicked
-    if st.session_state.get('show_recommendation', False):
-        with st.spinner("Analyzing..."):
-            result = advisor.recommend_action(
-                selected_driver_id, 
-                selected_datetime.strftime('%Y-%m-%d %H:%M:%S'),
-                verbose=False
-            )
-        
-        if 'error' in result:
-            st.error(f"{result['error']}")
-            st.stop()
-        
-        # Display Results
-        st.markdown("---")
-        st.header("Driver Status")
-        
-        # Metrics row
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("Hours Worked", f"{result['total_hours']:.1f} hrs")
-        
-        with col2:
-            st.metric("Jobs Completed", result['total_jobs'])
-        
-        with col3:
-            st.metric("Fatigue Level", f"{result['fatigue']:.0%}")
-            st.markdown(format_fatigue_badge(result['fatigue']))
-        
-        with col4:
-            st.markdown(f"Current Hex Code: {result['current_hex']}")
-        
-        # Current location info
-        st.markdown("---")
-        st.subheader("Current Location")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.metric("Base EPH", f"€{result['current_eph']:.2f}/hr")
-        
-        with col2:
-            st.metric("Effective EPH", f"€{result['current_effective_eph']:.2f}/hr", 
-                     help="Adjusted for fatigue")
-        
-        # Recommendation
-        st.markdown("---")
-        st.header("💡 Recommendation")
-        
-        # Color based on action
-        if result['action'] == 'break':
-            rec_class = "rec-break"
-            icon = "🛑"
-        elif result['action'] == 'move':
-            rec_class = "rec-move"
-            icon = "🚀"
+    predictor = DemandPredictor(heatmap_df)
+    engine = DecisionEngine(predictor=predictor, rides_trips_data=rides_trips_df)
+
+    st.sidebar.header("Driver & Shift Settings")
+
+    # Driver selection
+    driver_options = earners_df['earner_id'].tolist()
+    selected_driver = st.sidebar.selectbox("Select Driver ID", options=driver_options)
+
+    driver_info = earners_df[earners_df['earner_id'] == selected_driver].iloc[0]
+
+    # Time selection (latest or custom)
+    # For simplicity, we simulate hours_online and jobs_completed
+    time_mode = st.sidebar.radio("Hours Online / Jobs Completed Input Mode", options=["Simulated", "Custom"])
+
+    if time_mode == "Simulated":
+        hours_online = random.uniform(1, 4)
+        jobs_completed = random.randint(2, 8)
+    else:
+        hours_online = st.sidebar.number_input("Hours Online So Far", min_value=0.0, max_value=24.0, value=2.0, step=0.1)
+        jobs_completed = st.sidebar.number_input("Jobs Completed So Far", min_value=0, max_value=100, value=3, step=1)
+
+    # Hours to drive remaining
+    hours_to_drive = st.sidebar.number_input("Hours Remaining to Drive", min_value=0.1, max_value=12.0, value=2.0, step=0.1)
+    time_remaining_mins = hours_to_drive * 60
+
+    # Current location hex input
+    current_hex = st.sidebar.text_input("Current Location Hex ID", value=random.choice(heatmap_df["msg.predictions.hexagon_id_9"].drop_duplicates().tolist())).strip()
+
+    if current_hex not in heatmap_df["msg.predictions.hexagon_id_9"].values:
+        st.sidebar.warning("Current hex ID not found in heatmap data. Please enter a valid hex ID.")
+        st.stop()
+
+    # Sample candidate locations
+    candidate_locations = sample_candidate_locations(heatmap_df, current_hex, sample_size=5)
+
+    # Active quest detection (optional)
+    # For simplicity, no active quest integration here.
+
+    recommendation, details = engine.get_recommendation(
+        current_location=current_hex,
+        city_id=driver_info['home_city_id'],
+        fuel_type=driver_info['fuel_type'],
+        hours_online=hours_online,
+        jobs_completed=jobs_completed,
+        time_remaining_in_shift_mins=int(time_remaining_mins),
+        candidate_locations=candidate_locations,
+        active_quest=None
+    )
+
+    fatigue_level = details.get("fatigue_level", compute_fatigue(hours_online, jobs_completed))
+    base_eph = None
+    effective_eph = None
+    current_loc_data = None
+    best_option = None
+
+    ranked_options = details.get("ranked_options", [])
+    if ranked_options:
+        current_loc_data = next((opt for opt in ranked_options if opt["location"] == current_hex), None)
+        best_option = ranked_options[0]
+        if current_loc_data:
+            base_eph = current_loc_data.get("raw_eph", None)
+            effective_eph = current_loc_data.get("effective_eph", None)
+
+    # Layout: Metrics on top, recommendation card below
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Hours Online", f"{hours_online:.1f}")
+    col2.metric("Jobs Completed", f"{jobs_completed}")
+    col3.metric("Fatigue Level", f"{fatigue_level:.2f}")
+    col4.metric("Current Hex", current_hex)
+    col5.metric("Base EPH", f"${base_eph:.2f}" if base_eph is not None else "N/A")
+
+    if effective_eph is not None:
+        st.metric("Effective EPH (Current Location)", f"${effective_eph:.2f}")
+
+    # Recommendation card with color-coded status
+    def recommendation_color(rec_text: str) -> str:
+        rec_lower = rec_text.lower()
+        if "critical" in rec_lower or "break" in rec_lower:
+            return "red"
+        elif "move to" in rec_lower:
+            return "green"
         else:
-            rec_class = "rec-stay"
-            icon = "⏸️"
-        
-        if result['action'] == 'move':
-            st.markdown(f"Recommended Hex Code: {result['best_hex']}")
-        
-        # Best hotspot details (if moving)
-        if result['action'] == 'move':
-            st.markdown("---")
-            st.subheader("🎯 Best Hotspot Details")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("Location", result['best_hex'])
-            
-            with col2:
-                st.metric("Distance", f"{result['best_distance_km']} km")
-            
-            with col3:
-                st.metric("Travel Time", f"~{result['best_travel_time_mins']:.0f} min")
-            
-            with col4:
-                st.metric("Expected EPH", f"€{result['best_effective_eph']:.2f}/hr",
-                         delta=f"+{result['best_effective_eph'] - result['current_effective_eph']:.2f}")
-        
-        # Additional insights
-        if result['action'] == 'stay' and result.get('reason') == 'no_hotspots':
-            st.info("Info: No better locations found within 30 minutes drive. Current location is optimal.")
-        
-        elif result['action'] == 'stay' and result.get('reason') == 'insufficient_improvement':
-            st.info(f"Info: Best alternative only improves earnings by {(result['improvement_ratio'] - 1) * 100:.0f}%. "
-                   f"Travel time probably not worth it (need ≥25% improvement).")
+            return "orange"
+
+    rec_color = recommendation_color(recommendation)
+
+    st.markdown(f"## Recommendation")
+    st.markdown(f"<div style='padding: 1rem; border-radius: 8px; background-color: {rec_color}; color: white; font-size: 1.2rem;'>{recommendation}</div>", unsafe_allow_html=True)
+
+    if best_option and best_option["location"] != current_hex and rec_color == "green":
+        st.markdown("### Best Hotspot Details")
+        st.write(f"**Hex ID:** {best_option['location']}")
+        st.write(f"Distance: {best_option['distance_km']:.2f} km")
+        st.write(f"Travel Time: {best_option['travel_time_mins']:.1f} min")
+        st.write(f"Raw EPH: ${best_option['raw_eph']:.2f}")
+        st.write(f"Effective EPH: ${best_option['effective_eph']:.2f}")
+        if "final_score" in best_option:
+            st.write(f"Final Score: {best_option['final_score']:.2f}")
+
+    # Show candidate locations table with hex codes only
+    if ranked_options:
+        st.markdown("### Candidate Locations Analyzed")
+        df_opts = pd.DataFrame(ranked_options)
+        df_opts_display = df_opts[["location", "distance_km", "travel_time_mins", "raw_eph", "effective_eph", "final_score"]]
+        df_opts_display = df_opts_display.rename(columns={
+            "location": "Hex ID",
+            "distance_km": "Distance (km)",
+            "travel_time_mins": "Travel Time (min)",
+            "raw_eph": "Raw EPH ($/hr)",
+            "effective_eph": "Effective EPH ($/hr)",
+            "final_score": "Final Score"
+        })
+        st.dataframe(df_opts_display.style.format({
+            "Distance (km)": "{:.2f}",
+            "Travel Time (min)": "{:.1f}",
+            "Raw EPH ($/hr)": "${:.2f}",
+            "Effective EPH ($/hr)": "${:.2f}",
+            "Final Score": "{:.2f}"
+        }), use_container_width=True)
 
 if __name__ == "__main__":
     main()

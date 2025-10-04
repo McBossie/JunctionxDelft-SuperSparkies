@@ -2,7 +2,9 @@ import streamlit as st
 import pandas as pd
 import random
 from typing import Optional, Dict
-from next_locdemo import load_data_from_excel, DemandPredictor, DecisionEngine, FATIGUE_HIGH_THRESHOLD, FATIGUE_CRITICAL_THRESHOLD, MOVE_ADVANTANTAGE_THRESHOLD
+from core.data_loader import load_data_from_excel
+from core.decision import DemandPredictor, DecisionEngine, FATIGUE_HIGH_THRESHOLD, FATIGUE_CRITICAL_THRESHOLD, MOVE_ADVANTANTAGE_THRESHOLD
+from core.fatigue import compute_fatigue
 
 st.set_page_config(page_title="Uber Co-Pilot Advisor", layout="wide")
 
@@ -26,12 +28,7 @@ def sample_candidate_locations(heatmap_df: pd.DataFrame, current_hex: str, sampl
             count += 1
     return candidate_locations
 
-def compute_fatigue(hours_online: float, jobs_completed: int) -> float:
-    # replicate the fatigue calculation logic from DecisionEngine
-    MAX_HOURS_CONTINUOUS = 5
-    hour_fatigue = min(1.0, (hours_online / MAX_HOURS_CONTINUOUS))
-    job_fatigue = min(1.0, (jobs_completed / 50))
-    return min(1.0, (hour_fatigue * 0.7) + (job_fatigue * 0.3))
+## Fatigue calculation now imported from core.fatigue
 
 def main():
     st.title("Uber Co-Pilot Advisor")

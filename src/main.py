@@ -1,24 +1,17 @@
 
-# in terminal : pip install pandas
-#               pip install openpyxl
+from core.data_loader import load_data_from_excel
+from core.engine import UberDriverAdvisor
 
-import pandas as pd
-from engine import run_interactive
+def run_interactive(ride_trips, eats_orders, heatmap, surge_by_hour):
+    advisor = UberDriverAdvisor(ride_trips, eats_orders, heatmap, surge_by_hour)
+    # ...existing code for interactive CLI...
 
-def load_excel_data(file_path, name):
-  
-  df = pd.read_excel(file_path, sheet_name=name)
-  return df
-
-path_to_file = "/Users/chahid/projects/uber-copilot/data/data_sets.xlsx" 
-
-
-#my_uber_data = load_excel_data(path_to_file)
-
-earners = load_excel_data(path_to_file, "earners")
-ride_trips = load_excel_data(path_to_file, "rides_trips")
-eats_orders = load_excel_data(path_to_file, "eats_orders")
-surge_by_hour = load_excel_data(path_to_file, "surge_by_hour")
-heatmap = load_excel_data(path_to_file, "heatmap")
-
-run_interactive(ride_trips, eats_orders, heatmap, surge_by_hour)
+if __name__ == "__main__":
+    path_to_file = "/Users/chahid/projects/uber-copilot/data/data_sets.xlsx"
+    all_data = load_data_from_excel(path_to_file)
+    earners = all_data["earners"]
+    ride_trips = all_data["rides_trips"]
+    eats_orders = all_data["eats_orders"]
+    surge_by_hour = all_data["surge_by_hour"] if "surge_by_hour" in all_data else None
+    heatmap = all_data["heatmap"]
+    run_interactive(ride_trips, eats_orders, heatmap, surge_by_hour)

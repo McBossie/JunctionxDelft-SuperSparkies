@@ -45,7 +45,7 @@ class UberDriverAdvisor:
             hour_fatigue = 0.5 + (total_hours_driven - 8) / 8
         
         # Job intensity fatigue (many short jobs = more stressful)
-        job_fatigue = min(0.5, recent_jobs / 30)
+        job_fatigue = min(0.5, recent_jobs / 30) #???
         
         # Continuous work fatigue
         if hours_since_break is not None:

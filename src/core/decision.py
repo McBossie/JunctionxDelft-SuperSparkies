@@ -27,65 +27,80 @@ class DecisionEngine:
         job_fatigue = min(1.0, (jobs_completed / 50))
         return min(1.0, (hour_fatigue * 0.7) + (job_fatigue * 0.3))
     def get_recommendation(
-        self,
-        current_location: str,
-        city_id: int,
-        fuel_type: str,
-        hours_online: float,
-        jobs_completed: int,
-        time_remaining_in_shift_mins: int,
-        candidate_locations: Optional[Dict[str, Dict[str, float]]] = None,
-        desired_end_location: Optional[str] = None,
-        active_quest: Optional[Dict] = None
-    ) -> Tuple[str, Dict]:
-        fatigue_level = self._compute_fatigue(hours_online, jobs_completed)
-        details = { "fatigue_level": round(fatigue_level, 2), "hours_online": hours_online, "time_remaining_mins": time_remaining_in_shift_mins, "active_quest": active_quest }
-        if fatigue_level >= FATIGUE_CRITICAL_THRESHOLD:
-            return ("CRITICAL: Take a break. Your fatigue level is too high for safe driving.", details)
-        if hours_online > MAX_HOURS_CONTINUOUS:
-             return (f"Take a break. You've been driving for {hours_online:.1f} hours straight.", details)
-        if not candidate_locations:
-            candidate_locations = {current_location: {"distance_km": 0, "travel_time_mins": 0}}
-        predicted_eph = self.predictor.predict_eph(list(candidate_locations.keys()))
-        details["predicted_eph"] = predicted_eph
-        options = []
-        for loc, details_loc in candidate_locations.items():
-            travel_time_mins = details_loc["travel_time_mins"]
-            dist_km = details_loc["distance_km"]
-            if travel_time_mins >= time_remaining_in_shift_mins:
-                continue
-            vehicle_cost_per_km = FUEL_TYPE_COSTS_PER_KM.get(fuel_type, 0.30)
-            raw_eph = predicted_eph.get(loc, 10.0)
-            time_efficiency_multiplier = 60 / (60 + travel_time_mins)
-            travel_cost_hourly = (dist_km * vehicle_cost_per_km) * (60 / (travel_time_mins + 1)) if travel_time_mins > 0 else 0
-            effective_eph = (raw_eph * time_efficiency_multiplier) - travel_cost_hourly
-            options.append({ "location": loc, "distance_km": dist_km, "travel_time_mins": travel_time_mins, "raw_eph": raw_eph, "effective_eph": effective_eph })
-        if not options:
-            return ("Stay put. No viable alternative locations found within your shift time.", details)
-        for option in options:
-            score = option["effective_eph"]
-            if fatigue_level > FATIGUE_HIGH_THRESHOLD:
-                score -= (option["travel_time_mins"] * 0.1) * (fatigue_level - FATIGUE_HIGH_THRESHOLD)
-            if active_quest:
-                trips_needed = active_quest["target"] - active_quest["progress"]
-                if trips_needed > 0 and active_quest["deadline_hours"] > 0:
-                    required_rate = trips_needed / active_quest["deadline_hours"]
-                    avg_fare = self.avg_fare_by_city.get(city_id, 15.0)
-                    estimated_trip_rate = option["raw_eph"] / avg_fare if avg_fare > 0 else 0
-                    if estimated_trip_rate >= required_rate:
-                        quest_bonus_value = active_quest["reward"] / active_quest["target"]
-                        score += quest_bonus_value
-            option["final_score"] = score
-        ranked_options = sorted(options, key=lambda x: x["final_score"], reverse=True)
-        details["ranked_options"] = ranked_options
-        best_option = ranked_options[0]
-        current_option = next((opt for opt in ranked_options if opt["location"] == current_location), best_option)
-        if best_option["location"] == current_location:
-            return (f"Stay at {current_location}. It's currently your best option.", details)
-        improvement_ratio = best_option["final_score"] / current_option["final_score"] if current_option["final_score"] > 0 else float('inf')
-        details["improvement_ratio"] = round(improvement_ratio, 2)
-        if improvement_ratio >= MOVE_ADVANTANTAGE_THRESHOLD:
-            increase = best_option['final_score'] - current_option['final_score']
-            return (f"Move to {best_option['location']} (~{best_option['travel_time_mins']:.0f} min drive). Potential for ${increase:.2f}/hr more.", details)
-        else:
-            return (f"Stay at {current_location}. Moving to {best_option['location']} is not a significant improvement right now.", details)
+            self,
+            current_location: str,
+            city_id: int,
+            fuel_type: str,
+            hours_online: float,
+            jobs_completed: int,
+            time_remaining_in_shift_mins: int,
+            candidate_locations: Optional[Dict[str, Dict[str, float]]] = None,
+            desired_end_location: Optional[str] = None,
+            active_quest: Optional[Dict] = None,
+            surge_by_hour: Optional[pd.DataFrame] = None,
+            current_hour: Optional[int] = None
+        ) -> Tuple[str, Dict]:
+
+            fatigue_level = self._compute_fatigue(hours_online, jobs_completed)
+            details = {
+                "fatigue_level": round(fatigue_level, 2),
+                "hours_online": hours_online,
+                "time_remaining_mins": time_remaining_in_shift_mins,
+                "active_quest": active_quest
+            }
+
+            if fatigue_level >= FATIGUE_CRITICAL_THRESHOLD:
+                return ("CRITICAL: Take a break. Your fatigue level is too high for safe driving.", details)
+            if hours_online > MAX_HOURS_CONTINUOUS:
+                return (f"Take a break. You've been driving for {hours_online:.1f} hours straight.", details)
+
+            if not candidate_locations:
+                candidate_locations = {current_location: {"distance_km": 0, "travel_time_mins": 0}}
+
+            predicted_eph = self.predictor.predict_eph(list(candidate_locations.keys()))
+            details["predicted_eph"] = predicted_eph
+
+            options = []
+            for loc, loc_info in candidate_locations.items():
+                travel_time_mins = loc_info["travel_time_mins"]
+                dist_km = loc_info["distance_km"]
+
+                if travel_time_mins >= time_remaining_in_shift_mins:
+                    continue
+
+                vehicle_cost_per_km = FUEL_TYPE_COSTS_PER_KM.get(fuel_type, 0.30)
+                raw_eph = predicted_eph.get(loc, 10.0)
+                time_efficiency_multiplier = 60 / (60 + travel_time_mins)
+                travel_cost_hourly = (dist_km * vehicle_cost_per_km) * (60 / (travel_time_mins + 1)) if travel_time_mins > 0 else 0
+
+                surge_multiplier = 1.0
+                if surge_by_hour is not None and current_hour is not None:
+                    if current_hour in surge_by_hour.index:
+                        row = surge_by_hour.loc[current_hour]
+                        if isinstance(row, dict):
+                            surge_multiplier = row.get(loc, 1.0)
+                        else:
+                            surge_multiplier = getattr(row, loc, 1.0)
+
+                effective_eph = ((raw_eph * time_efficiency_multiplier) * surge_multiplier) - travel_cost_hourly
+
+                options.append({
+                    "location": loc,
+                    "distance_km": dist_km,
+                    "travel_time_mins": travel_time_mins,
+                    "raw_eph": raw_eph,
+                    "effective_eph": effective_eph,
+                    "surge_multiplier": surge_multiplier
+                })
+
+            if not options:
+                return ("Stay put. No viable alternative locations found within your shift time.", details)
+
+            ranked_options = sorted(options, key=lambda x: x["effective_eph"], reverse=True)
+            details["ranked_options"] = ranked_options
+            best_option = ranked_options[0]
+
+            if best_option["location"] != current_location and best_option["effective_eph"] - predicted_eph.get(current_location, 0) > MOVE_ADVANTANTAGE_THRESHOLD:
+                return (f"Move to {best_option['location']} for higher earnings.", details)
+            else:
+                return ("Stay at your current location.", details)

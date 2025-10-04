@@ -10,7 +10,7 @@ st.set_page_config(page_title="Uber Co-Pilot Advisor", layout="wide")
 
 @st.cache_data(show_spinner=False)
 def load_all_data():
-    data = load_data_from_excel("data/data_sets.xlsx")
+    data = load_data_from_excel("../data/data_sets.xlsx")
     if data is None:
         st.error("Failed to load data. Please ensure the Excel file exists in '../data/data_sets.xlsx'.")
         st.stop()
@@ -143,14 +143,19 @@ def main():
         st.write(f"Travel Time: {best_option['travel_time_mins']:.1f} min")
         st.write(f"Raw EPH: ${best_option['raw_eph']:.2f}")
         st.write(f"Effective EPH: ${best_option['effective_eph']:.2f}")
-        if "final_score" in best_option:
-            st.write(f"Final Score: {best_option['final_score']:.2f}")
+        final_score = best_option.get("final_score")
+        if final_score is not None:
+            st.write(f"Final Score: {final_score:.2f}")
 
     # Show candidate locations table with hex codes only
     if ranked_options:
         st.markdown("### Candidate Locations Analyzed")
         df_opts = pd.DataFrame(ranked_options)
-        df_opts_display = df_opts[["location", "distance_km", "travel_time_mins", "raw_eph", "effective_eph", "final_score"]]
+        # Determine columns that exist
+        cols = ["location", "distance_km", "travel_time_mins", "raw_eph", "effective_eph"]
+        if "final_score" in df_opts.columns:
+            cols.append("final_score")
+        df_opts_display = df_opts[cols]
         df_opts_display = df_opts_display.rename(columns={
             "location": "Hex ID",
             "distance_km": "Distance (km)",
@@ -169,4 +174,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

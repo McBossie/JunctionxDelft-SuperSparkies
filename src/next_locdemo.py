@@ -195,7 +195,7 @@ def main():
     Interactive main function to simulate a real-time recommendation for a driver.
     """
     # --- 1. Load and Prepare Data from Excel file ---
-    excel_file_path = "data/data_sets.xlsx"
+    excel_file_path = "../data/data_sets.xlsx"
     all_data = load_data_from_excel(excel_file_path)
     
     if not all_data:
@@ -262,22 +262,15 @@ def main():
 
     # MODIFIED: Get current location via free-text input and on-demand conversion.
     print("\nSome available locations include 'Amsterdam Centraal', 'TU Delft', 'Utrecht Centraal'")
+
     while True:
-        user_input_location = input("Enter your approximate current location: ").strip().lower()
-        found_location = False
-        # Search through all known hexes for a match.
-        for hex_id in hex_mapping.index:
-            # Convert hex to readable name on the fly.
-            readable_name = get_location_from_hex(hex_id, hex_mapping)
-            if user_input_location in readable_name.lower():
-                current_loc_hex = hex_id
-                print(f"--> Location matched: {readable_name}")
-                found_location = True
-                break
-        if found_location:
+        user_input_location = input("Enter your approximate current location hex code: ").strip()
+        if user_input_location in hex_mapping.index:
+            current_loc_hex = user_input_location
+            print(f"--> Location matched: {current_loc_hex}")
             break
         else:
-            print("Location not found in our data. Please try a more general name (e.g., a street or neighborhood).")
+            print("Hex code not found in our data. Please try again.")
     
     # --- 6. Simulate Driver State & Run Engine ---
     hours_online_sim = random.uniform(1, 4)
@@ -306,12 +299,8 @@ def main():
 
     # --- 7. Display Result with Readable Names ---
     readable_recommendation = recommendation
-    all_hex_ids = list(candidate_locations.keys())
-    for hex_id in all_hex_ids:
-        if hex_id in readable_recommendation:
-            readable_loc = get_location_from_hex(hex_id, hex_mapping)
-            readable_recommendation = readable_recommendation.replace(hex_id, f"'{readable_loc}'")
-            
+    # Removed loop that replaces hex IDs in readable_recommendation
+    
     print("\n=====================================")
     print(f"Recommendation for {driver_id}:")
     print(f"► {readable_recommendation}")
@@ -320,9 +309,8 @@ def main():
     if details.get('ranked_options'):
         print("\nTop Options Analyzed:")
         for opt in details['ranked_options']:
-            loc_name = get_location_from_hex(opt['location'], hex_mapping)
-            print(f"  - {loc_name}: Score={opt['final_score']:.2f} (Effective EPH: ${opt['effective_eph']:.2f})")
+            # Print hex codes directly instead of converting to readable location
+            print(f"  - {opt['location']}: Score={opt['final_score']:.2f} (Effective EPH: ${opt['effective_eph']:.2f})")
 
 if __name__ == "__main__":
     main()
-

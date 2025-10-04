@@ -6,7 +6,6 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from engine import UberDriverAdvisor
-from hex_readable import get_location_from_hex
 
 # Page config
 st.set_page_config(
@@ -121,7 +120,7 @@ def main():
     
     # Load data
     try:
-        ride_trips, eats_orders, heatmap, surge_by_hour, hex_mapping = load_data()
+        ride_trips, eats_orders, heatmap, surge_by_hour, merchants = load_data()
         advisor = get_advisor(ride_trips, eats_orders, heatmap, surge_by_hour)
         st.success(f"Data loaded: {len(ride_trips)} rides, {len(eats_orders)} deliveries")
     except Exception as e:
@@ -221,9 +220,7 @@ def main():
             st.markdown(format_fatigue_badge(result['fatigue']))
         
         with col4:
-            # Display current hex code converted to location using mapping
-            _, _, current_location_str = get_location_from_hex(result['current_hex'], hex_mapping)
-            st.metric("Current Location", current_location_str)
+            st.markdown(f"Current Hex Code: {result['current_hex']}")
         
         # Current location info
         st.markdown("---")
@@ -241,12 +238,6 @@ def main():
         st.markdown("---")
         st.header("💡 Recommendation")
         
-        # transform result into google maps link
-        hex_lat = result['current_lat']   # latitude of the hex center
-        hex_lon = result['current_lon']   # longitude of the hex center
-        maps_url = f"https://www.google.com/maps/search/?api=1&query={hex_lat},{hex_lon}"
-        
-        
         # Color based on action
         if result['action'] == 'break':
             rec_class = "rec-break"
@@ -259,10 +250,7 @@ def main():
             icon = "⏸️"
         
         if result['action'] == 'move':
-            st.markdown(
-                f"Go to [this area]({maps_url}) and wait there to pick up rides for more effective earnings!", 
-                unsafe_allow_html=True
-            )
+            st.markdown(f"Recommended Hex Code: {result['best_hex']}")
         
         # Best hotspot details (if moving)
         if result['action'] == 'move':
@@ -272,9 +260,7 @@ def main():
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                # Display best hex code converted to location using mapping
-                _, _, best_location_str = get_location_from_hex(result['best_hex'], hex_mapping)
-                st.metric("Location", best_location_str)
+                st.metric("Location", result['best_hex'])
             
             with col2:
                 st.metric("Distance", f"{result['best_distance_km']} km")

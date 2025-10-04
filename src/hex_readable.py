@@ -16,12 +16,17 @@ def latlon_to_location(lat, lon):
 
 # Get location from hex_id9
 def get_location_from_hex(hex_id, mapping):
-    if hex_id not in mapping.index:
-        return None, None, "Hex not found in mapping"
-    
-    lat, lon = mapping.loc[hex_id, ["lat", "lon"]]
-    location = latlon_to_location(lat, lon)
-    return lat, lon, location
+    # Normalize input hex_id
+    norm_hex_id = str(hex_id).strip().lower()
+    # Normalize mapping index if not already
+    if not all(isinstance(idx, str) and idx == idx.strip().lower() for idx in mapping.index):
+        mapping.index = mapping.index.map(lambda x: str(x).strip().lower())
+    try:
+        lat, lon = mapping.loc[norm_hex_id, ["lat", "lon"]]
+        location = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+        return lat, lon, location
+    except KeyError:
+        return None, None, "Unknown location"
 
 
 # if _name_ == "_main_":
